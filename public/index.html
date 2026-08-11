@@ -12,11 +12,6 @@
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
 <!-- EmailJS (for sending OTP emails) -->
 <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
-<!-- Firebase (compat SDK — works with plain <script> tags, no build step needed) -->
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
-<!-- EmailJS (for sending OTP verification codes) -->
-<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
 <style>
   :root{
     --blue-1:#1a1de0;
@@ -49,6 +44,20 @@
     position:relative;
     padding-bottom:40px;
   }
+  .stat-grid{ display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; padding:0 24px; margin-bottom:6px; }
+  .stat-card{
+    background:linear-gradient(160deg, rgba(255,255,255,.16) 0%, rgba(255,255,255,.05) 100%);
+    backdrop-filter:blur(16px) saturate(160%);
+    -webkit-backdrop-filter:blur(16px) saturate(160%);
+    border:1px solid rgba(255,255,255,.22);
+    border-radius:16px;
+    padding:14px;
+    cursor:pointer;
+    text-align:left;
+  }
+  .stat-card.active{ border-color:var(--pink); box-shadow:0 0 0 2px rgba(255,143,179,.4); }
+  .stat-value{ font-family:var(--font-display); font-size:26px; font-weight:800; line-height:1; }
+  .stat-label{ font-size:12px; color:var(--muted); margin-top:6px; font-weight:600; }
   .card-grid{ padding:0 24px; }
   .card-grid .glass{ margin:0 0 16px; }
   @media (min-width: 700px){
@@ -497,7 +506,7 @@ async function handleEnterLogin(){
 }
 
 async function enterUserPortal(){
-  go('user', { userStep:'phone' });
+  go('user', { userStep:'login' });
 }
 
 /* ================= CREATE EVENT ================= */
@@ -609,12 +618,54 @@ async function addGroup(eventId){
   const name = document.getElementById(`grpName_${eventId}`).value.trim();
   const fee = document.getElementById(`grpFee_${eventId}`).value.trim();
   const upi = document.getElementById(`grpUpi_${eventId}`).value.trim();
+  const timing = document.getElementById(`grpTiming_${eventId}`)?.value.trim() || '';
+  const address = document.getElementById(`grpAddress_${eventId}`)?.value.trim() || '';
+  const songs = document.getElementById(`grpSongs_${eventId}`)?.value.trim() || '';
   if(!name){ toast('Enter a group name'); return; }
   if(!fee || Number(fee)<=0){ toast('Enter a valid fixed fee'); return; }
   if(!upi){ toast('Enter a UPI ID'); return; }
-  DB.groups.push({ id: uid(), eventId, name, feeAmount: Number(fee), upiId: upi, media: [], createdAt: Date.now(), updatedAt: Date.now() });
+  DB.groups.push({ id: uid(), eventId, name, feeAmount: Number(fee), upiId: upi, timing, address, songs, media: [], createdAt: Date.now(), updatedAt: Date.now() });
   await saveDB();
   toast('Group added: ' + name);
+  render();
+}
+
+async function deleteGroup(groupId){
+  const g = DB.groups.find(g=>g.id===groupId);
+  if(!g) return;
+  if(!confirm(`Delete "${g.name}"? This removes all its members and media. This cannot be undone.`)) return;
+  DB.groups = DB.groups.filter(x=>x.id!==groupId);
+  DB.groupMembers = DB.groupMembers.filter(m=>m.groupId!==groupId);
+  DB.paymentRequests = DB.paymentRequests.filter(r=>r.groupId!==groupId);
+  await saveDB();
+  toast('Group deleted');
+  render();
+}
+
+async function editGroupDetails(groupId){
+  const g = DB.groups.find(g=>g.id===groupId);
+  if(!g) return;
+  const timing = prompt('Timing (e.g. 7:00 PM - 9:00 PM):', g.timing || '');
+  if(timing===null) return;
+  const address = prompt('Address / Venue:', g.address || '');
+  if(address===null) return;
+  const songs = prompt('Songs (comma separated):', g.songs || '');
+  if(songs===null) return;
+  g.timing = timing.trim();
+  g.address = address.trim();
+  g.songs = songs.trim();
+  g.updatedAt = Date.now();
+  const members = DB.groupMembers.filter(m=>m.groupId===groupId);
+  const notifiedUsers = new Set();
+  members.forEach(m=>{
+    const p = DB.participants.find(p=>p.id===m.participantId);
+    if(p && !notifiedUsers.has(p.userId)){
+      notifiedUsers.add(p.userId);
+      DB.notifications.push({ id: uid(), eventId: g.eventId, groupId, userId: p.userId, message: `${g.name} details were updated (timing/address/songs).`, timestamp: Date.now(), read:false });
+    }
+  });
+  await saveDB();
+  toast('Group details updated');
   render();
 }
 
@@ -768,7 +819,7 @@ async function handleUserLogin(){
   if(hash !== acct.passwordHash){ toast('Incorrect password'); return; }
   state.currentUserId = acct.id;
   state.userName = acct.name;
-  go('user', { userStep:'myEvents' });
+  go('user', { userStep:'dashboard' });
 }
 
 function goCreateUserProfile(){
@@ -808,7 +859,7 @@ async function verifyProfileOtp(){
   state.userName = acct.name;
   state._pendingProfile = null;
   state._otp = null;
-  go('user', { userStep:'myEvents' });
+  go('user', { userStep:'dashboard' });
   toast('Profile created! Welcome, ' + name + '.');
 }
 
@@ -1121,8 +1172,105 @@ function renderDashboard(){
     `;
   }
 
-  const activeEvent = state.activeEventId ? myEvents.find(e=>e.id===state.activeEventId) : myEvents[0];
+  const myEventIds = myEvents.map(e=>e.id);
+  const myGroups = DB.groups.filter(g=>myEventIds.includes(g.eventId));
+  const myGroupIds = myGroups.map(g=>g.id);
+  const myMembers = DB.groupMembers.filter(m=>myGroupIds.includes(m.groupId));
+  const myPending = DB.paymentRequests.filter(r=>myEventIds.includes(r.eventId) && r.status==='pending');
+  const feesDueTotal = myPending.reduce((sum,r)=>sum + (Number(r.amount)||0), 0);
+  const view = state.adminDashView || 'events';
 
+  const statCards = `
+    <div class="stat-grid">
+      <div class="stat-card ${view==='events'?'active':''}" onclick="setAdminDashView('events')">
+        <div class="stat-value">${myEvents.length}</div>
+        <div class="stat-label">🎉 Total Events</div>
+      </div>
+      <div class="stat-card ${view==='groups'?'active':''}" onclick="setAdminDashView('groups')">
+        <div class="stat-value">${myGroups.length}</div>
+        <div class="stat-label">👥 Total Groups</div>
+      </div>
+      <div class="stat-card ${view==='members'?'active':''}" onclick="setAdminDashView('members')">
+        <div class="stat-value">${myMembers.length}</div>
+        <div class="stat-label">👤 Total Members</div>
+      </div>
+      <div class="stat-card ${view==='requests'?'active':''}" onclick="setAdminDashView('requests')">
+        <div class="stat-value">${myPending.length}</div>
+        <div class="stat-label">🔔 Pending Requests</div>
+      </div>
+      <div class="stat-card" style="grid-column:span 2;">
+        <div class="stat-value">₹${feesDueTotal}</div>
+        <div class="stat-label">💰 Fees Due (awaiting verification)</div>
+      </div>
+    </div>
+  `;
+
+  let sectionContent = '';
+
+  if(view==='groups'){
+    const rows = myGroups.map(g=>{
+      const ev = DB.events.find(e=>e.id===g.eventId);
+      const memberCount = DB.groupMembers.filter(m=>m.groupId===g.id).length;
+      return `<div class="eventlist-row" style="cursor:default;">
+        <div class="thumb">👥</div>
+        <div class="info"><div class="n">${esc(g.name)}</div><div class="muted">${esc(ev?.name||'')} · ₹${esc(g.feeAmount)} · ${memberCount} member${memberCount!==1?'s':''}</div></div>
+      </div>`;
+    }).join('') || `<div class="empty">No groups yet.</div>`;
+    sectionContent = `<div class="section" style="padding-top:0;"><h2 style="font-size:17px;">All Groups</h2></div><div style="padding:0 24px;">${rows}</div>`;
+  }else if(view==='members'){
+    const rows = myMembers.map(m=>{
+      const g = DB.groups.find(g=>g.id===m.groupId);
+      const p = DB.participants.find(p=>p.id===m.participantId);
+      const ev = DB.events.find(e=>e.id===m.eventId);
+      return `<div class="eventlist-row" style="cursor:default;">
+        <div class="thumb">👤</div>
+        <div class="info"><div class="n">${esc(p?.name||'Participant')}</div><div class="muted">${esc(g?.name||'')} · ${esc(ev?.name||'')}${p?.flatNumber ? ' · '+esc(p.flatNumber) : ''}</div></div>
+      </div>`;
+    }).join('') || `<div class="empty">No members yet.</div>`;
+    sectionContent = `<div class="section" style="padding-top:0;"><h2 style="font-size:17px;">All Members</h2></div><div style="padding:0 24px;">${rows}</div>`;
+  }else if(view==='requests'){
+    const rows = myPending.map(r=>{
+      const p = DB.participants.find(p=>p.id===r.participantId);
+      const ev = DB.events.find(e=>e.id===r.eventId);
+      const groupName = r.groupId ? (DB.groups.find(g=>g.id===r.groupId)?.name || 'Group') : 'Membership';
+      const when = new Date(r.requestedAt).toLocaleString('en-IN',{ day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
+      return `
+        <div class="eventlist-row" style="cursor:default;align-items:flex-start;">
+          <div class="thumb">🔔</div>
+          <div class="info">
+            <div class="n">${esc(p ? p.name : 'Participant')} · ${esc(groupName)}</div>
+            <div class="muted">${esc(ev?.name||'')} · ₹${esc(r.amount)} · ${when}</div>
+            <div class="muted">Cross-check your UPI account for this amount at this time before approving.</div>
+            <button class="btn primary small" onclick="approvePaymentRequest('${r.id}')">✓ Verified — Approve</button>
+          </div>
+        </div>`;
+    }).join('') || `<div class="empty">No pending payment requests.</div>`;
+    sectionContent = `<div class="section" style="padding-top:0;"><h2 style="font-size:17px;">Pending Requests</h2></div><div style="padding:0 24px;">${rows}</div>`;
+  }else{
+    sectionContent = renderAdminEventCards(myEvents);
+  }
+
+  return `
+    ${renderTopbar(false)}
+    <div class="section">
+      <h2>Dashboard</h2>
+      <p>${esc(state.currentAdmin)}</p>
+    </div>
+    ${statCards}
+    ${sectionContent}
+    <div style="padding:0 24px;">
+      <button class="btn outline" onclick="go('createEvent')">+ Create Another Event</button>
+      <button class="btn ghost" onclick="logoutAdmin()">Logout</button>
+    </div>
+  `;
+}
+
+function setAdminDashView(v){
+  state.adminDashView = v;
+  render();
+}
+
+function renderAdminEventCards(myEvents){
   const cards = myEvents.map(ev=>{
     const interestCount = DB.interests.filter(i=>i.eventId===ev.id).length;
     const participantCount = DB.participants.filter(p=>p.eventId===ev.id).length;
@@ -1136,10 +1284,15 @@ function renderDashboard(){
       <div class="eventlist-row" style="cursor:default;flex-direction:column;align-items:flex-start;">
         <div style="display:flex;align-items:center;gap:12px;width:100%;">
           <div class="thumb">👥</div>
-          <div class="info"><div class="n">${esc(g.name)}</div><div class="muted">₹${esc(g.feeAmount)} · UPI: ${esc(g.upiId)} · ${memberCount} member${memberCount!==1?'s':''} · ${mediaCount} file${mediaCount!==1?'s':''}</div></div>
+          <div class="info"><div class="n">${esc(g.name)}</div><div class="muted">₹${esc(g.feeAmount)} · UPI: ${esc(g.upiId)} · ${memberCount} member${memberCount!==1?'s':''} · ${mediaCount} file${mediaCount!==1?'s':''}</div>
+          ${g.timing || g.address ? `<div class="muted">${g.timing?`⏰ ${esc(g.timing)}`:''}${g.timing && g.address?' · ':''}${g.address?`📍 ${esc(g.address)}`:''}</div>`:''}
+          ${g.songs ? `<div class="muted">🎵 ${esc(g.songs)}</div>` : ''}
+          </div>
         </div>
         <div style="padding-left:56px;width:100%;">
           <input type="file" onchange="uploadGroupMedia('${ev.id}','${g.id}', event)" style="margin-top:6px;">
+          <button class="btn ghost small" onclick="editGroupDetails('${g.id}')">✏️ Edit Timing / Address / Songs</button>
+          <button class="btn ghost small" style="color:#ff8fb3;" onclick="deleteGroup('${g.id}')">🗑 Delete Group</button>
         </div>
       </div>`;
     }).join('') || `<div class="muted" style="margin-bottom:10px;">No groups yet.</div>`;
@@ -1186,6 +1339,12 @@ function renderDashboard(){
       </div>
       <label>UPI ID</label>
       <input id="grpUpi_${ev.id}" placeholder="e.g. organiser@upi">
+      <label>Timing (optional)</label>
+      <input id="grpTiming_${ev.id}" placeholder="e.g. 7:00 PM - 9:00 PM">
+      <label>Address / Venue (optional)</label>
+      <input id="grpAddress_${ev.id}" placeholder="e.g. Community Hall, Sector 5">
+      <label>Songs (optional)</label>
+      <input id="grpSongs_${ev.id}" placeholder="e.g. Song 1, Song 2, Song 3">
       <button class="btn outline small" onclick="addGroup('${ev.id}')">+ Add Group</button>
 
       <div class="divider"></div>
@@ -1205,17 +1364,8 @@ function renderDashboard(){
   const totalPending = DB.paymentRequests.filter(r=>myEvents.some(e=>e.id===r.eventId) && r.status==='pending').length;
 
   return `
-    ${renderTopbar(false)}
-    <div class="section">
-      <h2>Your Events</h2>
-      <p>${esc(state.currentAdmin)}</p>
-    </div>
-    ${totalPending>0 ? `<div class="section" style="padding-top:0;"><div class="banner warn">🔔 <b>${totalPending}</b> payment request${totalPending>1?'s':''} waiting for your verification — scroll down to review.</div></div>` : ''}
+    ${totalPending>0 ? `<div class="section" style="padding-top:0;"><div class="banner warn">🔔 <b>${totalPending}</b> payment request${totalPending>1?'s':''} waiting for your verification.</div></div>` : ''}
     <div class="card-grid">${cards}</div>
-    <div style="padding:0 24px;">
-      <button class="btn outline" onclick="go('createEvent')">+ Create Another Event</button>
-      <button class="btn ghost" onclick="logoutAdmin()">Logout</button>
-    </div>
   `;
 }
 
@@ -1240,6 +1390,81 @@ async function updateEventStatus(eid, status){
   await saveDB();
   toast('Status updated to ' + statusLabel(status));
   render();
+}
+
+function renderUserDashboard(){
+  const uidc = state.currentUserId;
+  const unread = DB.notifications.filter(n=>n.userId===uidc && !n.read);
+  const myParts = DB.participants.filter(p=>p.userId===uidc);
+
+  const notifRows = unread.map(n=>`
+    <div class="banner success" style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+      <span>🔔 ${esc(n.message)}</span>
+      <span style="cursor:pointer;font-weight:800;flex-shrink:0;" onclick="dismissNotification('${n.id}')">✕</span>
+    </div>`).join('');
+
+  const participantCards = myParts.map(p=>{
+    const ev = DB.events.find(e=>e.id===p.eventId);
+    if(!ev) return '';
+    const membershipNeeded = !!ev.membershipEnabled;
+    const membershipStatus = membershipNeeded ? participantPaymentStatus(p.id, null) : 'approved';
+    const membershipDone = !membershipNeeded || membershipStatus==='approved';
+    const myGroupMemberships = DB.groupMembers.filter(m=>m.participantId===p.id);
+
+    const groupBlocks = myGroupMemberships.map(m=>{
+      const g = DB.groups.find(g=>g.id===m.groupId);
+      if(!g) return '';
+      const media = g.media || [];
+      const mediaHtml = media.length
+        ? media.map(md=>`<a href="${md.dataUrl}" download="${esc(md.fileName)}" style="display:block;color:var(--white);font-size:13px;margin-top:4px;text-decoration:underline;">📎 ${esc(md.fileName)}</a>`).join('')
+        : `<div class="muted" style="margin-top:4px;">No media uploaded yet.</div>`;
+      return `
+        <div class="eventlist-row" style="cursor:default;flex-direction:column;align-items:flex-start;">
+          <div style="display:flex;align-items:center;gap:12px;width:100%;">
+            <div class="thumb">👥</div>
+            <div class="info"><div class="n">${esc(g.name)} — ✅ Fees Done</div>
+            ${g.timing || g.address ? `<div class="muted">${g.timing?`⏰ ${esc(g.timing)}`:''}${g.timing && g.address?' · ':''}${g.address?`📍 ${esc(g.address)}`:''}</div>` : ''}
+            ${g.songs ? `<div class="muted">🎵 Songs: ${esc(g.songs)}</div>` : ''}
+            </div>
+          </div>
+          <div style="padding-left:56px;width:100%;">
+            <div class="muted" style="margin-top:4px;font-weight:700;">📎 Media Files</div>
+            ${mediaHtml}
+          </div>
+        </div>`;
+    }).join('') || `<div class="muted">Not part of any group yet.</div>`;
+
+    return `
+      <div class="glass">
+        <h3 style="font-size:16px;">👤 ${esc(p.name)}</h3>
+        <div class="muted">${esc(ev.name)} · ${esc(p.category)}${p.flatNumber ? ' · '+esc(p.flatNumber) : ''}</div>
+        <div class="divider"></div>
+        <div class="muted">Membership: ${membershipDone ? '<b style="color:#7dffb4;">✅ Done</b>' : '<b style="color:#ffce6e;">⏳ Pending</b>'}</div>
+        <div class="divider"></div>
+        <h3 style="font-size:14px;">Groups</h3>
+        ${groupBlocks}
+        <button class="btn ghost small" style="margin-top:10px;" onclick="viewMyEvent('${ev.id}')">Manage in Event →</button>
+      </div>`;
+  }).join('');
+
+  return `
+    ${renderTopbar(true)}
+    <div class="section" style="padding-top:6px;">
+      <h2>Your Dashboard</h2>
+      <p>${esc(state.userName)}</p>
+    </div>
+    <div class="section" style="padding-top:0;">
+      ${notifRows}
+    </div>
+    <div class="card-grid">
+      ${participantCards || `<div class="empty">You haven't joined any groups yet.</div>`}
+    </div>
+    <div style="padding:0 24px;">
+      <button class="btn outline" onclick="go('user',{userStep:'myEvents'})">My Events</button>
+      <button class="btn outline" onclick="goJoinByCode()">+ Join Event by Code</button>
+      <button class="btn ghost" onclick="exitUserPortal()">Logout</button>
+    </div>
+  `;
 }
 
 function renderUserPortal(){
@@ -1341,6 +1566,10 @@ function renderUserPortal(){
         <button class="btn ghost" onclick="state.userStep='login';render();">Back to Login</button>
       </div>
     `;
+  }
+
+  if(step==='dashboard'){
+    return renderUserDashboard();
   }
 
   if(step==='myEvents'){
